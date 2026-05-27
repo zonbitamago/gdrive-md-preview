@@ -72,7 +72,14 @@ push / PR 時に `npm run check` と `npm test` を実行する。
      `transformMermaidGlobals` で `globalThis.(__esbuild_esm_\w+)` をローカル参照へ置換。
   2. Tampermonkey サンドボックスの `globalThis` と eval 内の `globalThis` が別物 →
      グローバル読みに頼らず `(0,eval)(code + "\n;globalThis.mermaid;")` の**戻り値**で受け取る。
-  別タブ側の Mermaid は CDN を `<script>` で読んで `mermaid.run()`(blob は CSP 対象外)。
+- **別タブ(blob)は開いた文書(Drive)の CSP を継承する**: Drive の `script-src` は
+  `strict-dynamic` + nonce のため、新タブに `<script src>` やインライン `<script>` を入れても
+  **実行できない**(v2.6.0 でこれを踏んで Mermaid が出なくなった)。
+  → 新タブはスクリプトを一切含めない静的 HTML にする。Mermaid は userScripts 領域
+  (CSP 対象外)側で SVG に**事前描画**して埋め込む(`renderMarkdownToStaticHtml`)。
+  非同期描画とポップアップブロックの両立のため、`window.open("","_blank")` で空タブを
+  **同期的に**開いてから、描画完了後に `win.location.href = blobURL` で遷移させる。
+  (inline `<style>` は通る = style-src は許容。ブロックされるのは script だけ。)
 - **GM_addStyle が CSP で無効化される可能性**に備え、パネルの致命的スタイル(位置・サイズ・
   重なり)は `applyBaseStyle` が **CSSOM で直接当てる**(stylesheet と二重化)。
 - **ポップアップブロック回避**: 別タブを開く処理は `await` を挟まず**ユーザー操作と同期的に**

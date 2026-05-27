@@ -1,6 +1,6 @@
 {
   "name": "gdrive-md-preview",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "description": "Google Drive で Markdown(.md)プレビューを整形表示する Tampermonkey ユーザースクリプト",
   "license": "MIT",
   "private": true,

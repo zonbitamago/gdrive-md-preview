@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.6.0
+// @version      2.6.1
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -370,37 +370,43 @@
 
   // --- 別タブ表示 -----------------------------------------------------------
 
-  // 別タブ用の自己完結 HTML を生成する。mermaid コードブロックは mermaid.run が
-  // 拾える <pre class="mermaid"> へ変換し、図があるときだけ CDN を読み込んで
-  // 新タブ側で描画する(blob は CSP 対象外なので CDN/インライン script 可)。
-  function makeNewTabDoc(fallbackTitle, html) {
+  // 整形済み html を静的 HTML に変換する。新タブ(blob)は開いた文書(Drive)の
+  // CSP を継承し script を実行できないため、Mermaid は userScripts 領域(CSP 対象外)
+  // 側で SVG に事前描画してから埋め込む。スクリプトは一切含めない。
+  async function renderMarkdownToStaticHtml(fallbackTitle, html) {
     const container = document.createElement("div");
+    container.className = "markdown-body";
+    // 画面外に一時接続する(mermaid のレイアウト計測には DOM 接続が必要)。
+    container.style.cssText =
+      "position:fixed;left:-99999px;top:0;width:900px;visibility:hidden;";
     container.innerHTML = html; // html は toHtml() でサニタイズ済み
-    const heading = container.querySelector("h1, h2, h3");
-    const titleText =
-      (heading && heading.textContent.trim()) || fallbackTitle || "Markdown";
-    const blocks = container.querySelectorAll("code.language-mermaid");
-    blocks.forEach((code) => {
-      const pre = code.closest("pre") || code;
-      const m = document.createElement("pre");
-      m.className = "mermaid";
-      m.textContent = code.textContent;
-      pre.replaceWith(m);
-    });
-    const scripts = blocks.length
-      ? '<script src="' +
-        MERMAID_URL +
-        '"></script><script>mermaid.initialize({startOnLoad:false,securityLevel:"strict"});mermaid.run();</script>'
-      : "";
-    return buildStandaloneDoc(titleText, container.innerHTML, NEWTAB_CSS, scripts);
+    document.body.appendChild(container);
+    try {
+      await renderMermaid(container); // ```mermaid を SVG 化(失敗時はコードのまま)
+      const heading = container.querySelector("h1, h2, h3");
+      const titleText =
+        (heading && heading.textContent.trim()) || fallbackTitle || "Markdown";
+      return buildStandaloneDoc(titleText, container.innerHTML, NEWTAB_CSS);
+    } finally {
+      container.remove();
+    }
   }
 
-  // 整形済み html を新しいタブ(blob)で開く。ポップアップブロックを避けるため
-  // ユーザー操作と同期的に行う(await を挟まない)。
+  // 整形済み内容を新しいタブで開く。先に空タブを同期的に開いて(ポップアップ
+  // ブロック回避)、SVG 描画が終わってから blob へ遷移させる。
   function openHtmlInNewTab(fallbackTitle, html) {
-    const doc = makeNewTabDoc(fallbackTitle, html);
-    const url = URL.createObjectURL(new Blob([doc], { type: "text/html" }));
-    window.open(url, "_blank");
+    const win = window.open("", "_blank");
+    if (!win) return; // ポップアップがブロックされた
+    renderMarkdownToStaticHtml(fallbackTitle, html)
+      .then((doc) => {
+        win.location.href = URL.createObjectURL(
+          new Blob([doc], { type: "text/html" })
+        );
+      })
+      .catch((e) => {
+        LOG("open new tab failed:", e && e.message);
+        win.close();
+      });
   }
 
   // --- パネル ---------------------------------------------------------------
