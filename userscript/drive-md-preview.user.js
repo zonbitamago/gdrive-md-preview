@@ -1,8 +1,14 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.2.2
+// @version      2.3.0
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
+// @author       zonbitamago
+// @license      MIT
+// @homepageURL  https://github.com/zonbitamago/gdrive-md-preview
+// @supportURL   https://github.com/zonbitamago/gdrive-md-preview/issues
+// @downloadURL  https://raw.githubusercontent.com/zonbitamago/gdrive-md-preview/main/userscript/drive-md-preview.user.js
+// @updateURL    https://raw.githubusercontent.com/zonbitamago/gdrive-md-preview/main/userscript/drive-md-preview.user.js
 // @match        https://drive.google.com/*
 // @run-at       document-idle
 // @require      https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js
