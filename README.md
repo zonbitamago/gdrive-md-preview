@@ -104,6 +104,7 @@ test/userscript.test.js              … 純粋ロジックのユニットテス
 package.json                         … テスト/構文チェックのスクリプト
 .github/workflows/ci.yml             … CI(構文チェック + テスト)
 README.md                            … このファイル
+CLAUDE.md                            … Claude Code 向けの開発ガイド
 LICENSE                              … MIT ライセンス
 ```
 
