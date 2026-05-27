@@ -1,5 +1,7 @@
 # Drive Markdown Preview
 
+[![CI](https://github.com/zonbitamago/gdrive-md-preview/actions/workflows/ci.yml/badge.svg)](https://github.com/zonbitamago/gdrive-md-preview/actions/workflows/ci.yml)
+
 Google Drive で `.md`(Markdown)ファイルのプレビューを開いたとき、プレーン
 テキストの代わりに**整形済みの表示**を重ねて見せる Tampermonkey ユーザー
 スクリプトです。
