@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.4.0
+// @version      2.5.0
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -58,8 +58,9 @@
   // 内容が変わったときだけピル/パネルを作り直す判定に使う。
   let currentKey = null;
 
-  // ユーザーがリサイズした最後のパネルサイズ(セッション内で記憶。再読込で消える)。
+  // ユーザーがリサイズ/移動した最後のパネルサイズと位置(セッション内で記憶)。
   let savedSize = null;
+  let savedPos = null;
 
   // --- 純粋ヘルパー(test/userscript.test.js でテストする) -------------------
 
@@ -100,6 +101,43 @@
     return { w, h, left, top: TOP };
   }
 
+  // ドラッグ移動後の位置を、パネルが画面内に最低限残るよう丸める。
+  function clampPanelPosition(left, top, w, h, viewportW, viewportH) {
+    const KEEP = 80; // 横方向に最低限画面に残す量
+    const minLeft = KEEP - w;
+    const maxLeft = viewportW - KEEP;
+    const minTop = 0; // 上は隠さない(ヘッダーを掴めるように)
+    const maxTop = viewportH - 40;
+    return {
+      left: Math.min(Math.max(left, minLeft), Math.max(minLeft, maxLeft)),
+      top: Math.min(Math.max(top, minTop), Math.max(minTop, maxTop)),
+    };
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  // 「別タブで開く」用の自己完結 HTML を組み立てる(content は描画済みの
+  // サニタイズ済み HTML を想定)。
+  function buildStandaloneDoc(title, contentHtml, css) {
+    return (
+      '<!doctype html><html lang="ja"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      "<title>" +
+      escapeHtml(title) +
+      "</title><style>" +
+      css +
+      "</style></head>" +
+      '<body><article class="markdown-body">' +
+      contentHtml +
+      "</article></body></html>"
+    );
+  }
+
   // --- スタイル -------------------------------------------------------------
 
   const STYLE = `
@@ -114,7 +152,7 @@
   flex-direction:row;align-items:center;gap:12px;width:auto;max-width:92vw}
 #gmd-panel.gmd-error{background:#fff0f0;color:#b3261e}
 .gmd-header{display:flex;align-items:center;gap:8px;padding:10px 14px;
-  background:#f6f8fa;border-bottom:1px solid #d0d7de}
+  background:#f6f8fa;border-bottom:1px solid #d0d7de;cursor:move;user-select:none}
 .gmd-title{flex:1;min-width:0;font-size:13px;font-weight:600;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
 .gmd-btn{flex:none;border:1px solid #d0d7de;background:#fff;color:#1f2328;
@@ -156,6 +194,28 @@
 .gmd-mermaid svg{max-width:100%;height:auto}
 `;
 
+  // 「別タブで開く」先(blob)用の自己完結スタイル。
+  const NEWTAB_CSS =
+    "body{margin:0;background:#f5f6f8;color:#1f2328;" +
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Sans',Meiryo,sans-serif}" +
+    ".markdown-body{max-width:900px;margin:24px auto;padding:32px 40px;background:#fff;" +
+    "border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.12);font-size:15px;line-height:1.7}" +
+    ".markdown-body>*:first-child{margin-top:0}" +
+    ".markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4{margin:24px 0 16px;line-height:1.3}" +
+    ".markdown-body h1,.markdown-body h2{padding-bottom:.3em;border-bottom:1px solid #d8dee4}" +
+    ".markdown-body code{background:rgba(175,184,193,.2);padding:.2em .4em;border-radius:6px;" +
+    "font-size:85%;font-family:Consolas,Menlo,monospace}" +
+    ".markdown-body pre{background:#f6f8fa;padding:16px;border-radius:8px;overflow:auto}" +
+    ".markdown-body pre code{background:none;padding:0;font-size:100%}" +
+    ".markdown-body blockquote{margin:0 0 16px;padding:0 1em;color:#57606a;border-left:4px solid #d0d7de}" +
+    ".markdown-body table{border-collapse:collapse}" +
+    ".markdown-body th,.markdown-body td{border:1px solid #d0d7de;padding:6px 13px}" +
+    ".markdown-body th,.markdown-body tr:nth-child(2n){background:#f6f8fa}" +
+    ".markdown-body img{max-width:100%}.markdown-body a{color:#0969da}" +
+    ".markdown-body hr{border:0;height:1px;background:#d8dee4;margin:24px 0}" +
+    ".gmd-mermaid{margin:0 0 16px;text-align:center;overflow-x:auto}" +
+    ".gmd-mermaid svg{max-width:100%;height:auto}";
+
   // GM_addStyle が CSP 等で無効化されても最低限パネルが見えるよう、
   // 位置・サイズ・重なりなど致命的なスタイルは CSSOM で直接当てる。
   // サイズは computePanelBox で算出(リサイズ後の savedSize を反映)。
@@ -163,10 +223,14 @@
     const vw = (typeof window !== "undefined" && window.innerWidth) || 1200;
     const vh = (typeof window !== "undefined" && window.innerHeight) || 800;
     const box = computePanelBox(vw, vh, savedSize);
+    // 移動済みなら保存位置を画面内にクランプして使う。
+    const pos = savedPos
+      ? clampPanelPosition(savedPos.left, savedPos.top, box.w, box.h, vw, vh)
+      : { left: box.left, top: box.top };
     Object.assign(el.style, {
       position: "fixed",
-      top: box.top + "px",
-      left: box.left + "px",
+      top: pos.top + "px",
+      left: pos.left + "px",
       width: box.w + "px",
       height: box.h + "px",
       minWidth: "320px",
@@ -365,13 +429,18 @@
     toggleBtn.className = "gmd-btn";
     toggleBtn.textContent = "ソース表示";
 
+    const newTabBtn = document.createElement("button");
+    newTabBtn.type = "button";
+    newTabBtn.className = "gmd-btn";
+    newTabBtn.textContent = "⧉ 別タブ";
+
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
     closeBtn.className = "gmd-btn gmd-close";
     closeBtn.setAttribute("aria-label", "閉じる");
     closeBtn.textContent = "×";
 
-    header.append(title, toggleBtn, closeBtn);
+    header.append(title, newTabBtn, toggleBtn, closeBtn);
 
     const body = document.createElement("div");
     body.className = "gmd-body markdown-body";
@@ -409,6 +478,45 @@
     closeBtn.addEventListener("click", () => {
       // 閉じたらピル表示に戻す(自動では再オープンしない)。
       showPill();
+    });
+
+    // 別タブで開く: 現在の描画済み本文(Mermaid SVG 含む)を独立タブに表示。
+    // ソース表示中なら整形済み html を使う。
+    newTabBtn.addEventListener("click", () => {
+      const contentHtml = body.classList.contains("markdown-body")
+        ? body.innerHTML
+        : html;
+      const doc = buildStandaloneDoc(title.textContent, contentHtml, NEWTAB_CSS);
+      const url = URL.createObjectURL(new Blob([doc], { type: "text/html" }));
+      window.open(url, "_blank");
+    });
+
+    // ヘッダーを掴んでパネルを移動できるようにする(ボタン上では無効)。
+    header.addEventListener("pointerdown", (e) => {
+      if (e.target.closest("button")) return;
+      e.preventDefault();
+      const rect = panel.getBoundingClientRect();
+      const offsetX = e.clientX - rect.left;
+      const offsetY = e.clientY - rect.top;
+      const onMove = (ev) => {
+        const pos = clampPanelPosition(
+          ev.clientX - offsetX,
+          ev.clientY - offsetY,
+          panel.offsetWidth,
+          panel.offsetHeight,
+          window.innerWidth,
+          window.innerHeight
+        );
+        panel.style.left = pos.left + "px";
+        panel.style.top = pos.top + "px";
+        savedPos = pos;
+      };
+      const onUp = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
     });
 
     panel.append(header, body);
@@ -497,6 +605,8 @@
     makeKey,
     transformMermaidGlobals,
     computePanelBox,
+    clampPanelPosition,
+    buildStandaloneDoc,
     __bootstrap,
   };
 });
