@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.3.1
+// @version      2.4.0
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -58,6 +58,9 @@
   // 内容が変わったときだけピル/パネルを作り直す判定に使う。
   let currentKey = null;
 
+  // ユーザーがリサイズした最後のパネルサイズ(セッション内で記憶。再読込で消える)。
+  let savedSize = null;
+
   // --- 純粋ヘルパー(test/userscript.test.js でテストする) -------------------
 
   // ファイル名が Markdown 拡張子か。
@@ -79,13 +82,33 @@
     return src.replace(/globalThis\.(__esbuild_esm_\w+)/g, "$1");
   }
 
+  // パネルの初期/復元サイズと中央寄せ位置を計算する。
+  // saved(={w,h})があればそれを優先し、最小/最大(ビューポート基準)で丸める。
+  function computePanelBox(viewportW, viewportH, saved) {
+    const MIN_W = 320;
+    const MIN_H = 200;
+    const TOP = 64;
+    const defW = Math.min(900, Math.round(viewportW * 0.92));
+    const defH = Math.min(Math.round(viewportH * 0.8), viewportH - 96);
+    const maxW = Math.round(viewportW * 0.96);
+    const maxH = viewportH - 32;
+    let w = saved && saved.w ? saved.w : defW;
+    let h = saved && saved.h ? saved.h : defH;
+    w = Math.min(Math.max(w, MIN_W), Math.max(MIN_W, maxW));
+    h = Math.min(Math.max(h, MIN_H), Math.max(MIN_H, maxH));
+    const left = Math.max(8, Math.round((viewportW - w) / 2));
+    return { w, h, left, top: TOP };
+  }
+
   // --- スタイル -------------------------------------------------------------
 
   const STYLE = `
-#gmd-panel{position:fixed;top:64px;left:50%;transform:translateX(-50%);
-  z-index:2147483000;width:min(900px,92vw);max-height:calc(100vh - 96px);
+#gmd-panel{position:fixed;top:64px;z-index:2147483000;
+  width:min(900px,92vw);height:min(80vh,calc(100vh - 96px));
+  min-width:320px;min-height:200px;max-width:96vw;max-height:calc(100vh - 32px);
   display:flex;flex-direction:column;background:#fff;color:#1f2328;
   border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);overflow:hidden;
+  resize:both;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Sans',Meiryo,sans-serif}
 #gmd-panel.gmd-loading,#gmd-panel.gmd-error{padding:16px 20px;font-size:14px;
   flex-direction:row;align-items:center;gap:12px;width:auto;max-width:92vw}
@@ -98,7 +121,7 @@
   border-radius:6px;padding:4px 10px;font-size:12px;line-height:1.4;cursor:pointer}
 .gmd-btn:hover{background:#eef1f4}
 .gmd-close{font-size:16px;line-height:1;padding:3px 9px;font-weight:700}
-.gmd-body{padding:24px 32px 40px;overflow-y:auto;font-size:15px;line-height:1.7}
+.gmd-body{flex:1 1 auto;min-height:0;padding:24px 32px 40px;overflow-y:auto;font-size:15px;line-height:1.7}
 .gmd-source{margin:0;white-space:pre-wrap;word-break:break-word;
   font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.6}
 #gmd-pill{position:fixed;right:24px;bottom:24px;z-index:2147483000;border:none;
@@ -134,16 +157,23 @@
 `;
 
   // GM_addStyle が CSP 等で無効化されても最低限パネルが見えるよう、
-  // 位置・重なり・背景など致命的なスタイルは CSSOM で直接当てる。
+  // 位置・サイズ・重なりなど致命的なスタイルは CSSOM で直接当てる。
+  // サイズは computePanelBox で算出(リサイズ後の savedSize を反映)。
   function applyBaseStyle(el) {
+    const vw = (typeof window !== "undefined" && window.innerWidth) || 1200;
+    const vh = (typeof window !== "undefined" && window.innerHeight) || 800;
+    const box = computePanelBox(vw, vh, savedSize);
     Object.assign(el.style, {
       position: "fixed",
-      top: "64px",
-      left: "50%",
-      transform: "translateX(-50%)",
+      top: box.top + "px",
+      left: box.left + "px",
+      width: box.w + "px",
+      height: box.h + "px",
+      minWidth: "320px",
+      minHeight: "200px",
+      maxWidth: "96vw",
+      maxHeight: "calc(100vh - 32px)",
       zIndex: "2147483000",
-      width: "min(900px,92vw)",
-      maxHeight: "calc(100vh - 96px)",
       display: "flex",
       flexDirection: "column",
       background: "#fff",
@@ -151,6 +181,7 @@
       borderRadius: "12px",
       boxShadow: "0 12px 40px rgba(0,0,0,.35)",
       overflow: "hidden",
+      resize: "both",
     });
   }
 
@@ -382,6 +413,15 @@
 
     panel.append(header, body);
     document.body.appendChild(panel);
+
+    // ユーザーがリサイズしたサイズをセッション内で記憶し、次回表示時に復元する。
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => {
+        if (panel.isConnected && panel.offsetWidth && panel.offsetHeight) {
+          savedSize = { w: panel.offsetWidth, h: panel.offsetHeight };
+        }
+      }).observe(panel);
+    }
   }
 
   // --- 監視ループ -----------------------------------------------------------
@@ -451,5 +491,12 @@
   }
 
   // Node(テスト)向けに純粋関数を公開しつつ、ブラウザ起動用に __bootstrap を渡す。
-  return { MD_EXT, isMarkdownName, makeKey, transformMermaidGlobals, __bootstrap };
+  return {
+    MD_EXT,
+    isMarkdownName,
+    makeKey,
+    transformMermaidGlobals,
+    computePanelBox,
+    __bootstrap,
+  };
 });
