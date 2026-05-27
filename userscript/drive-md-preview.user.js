@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.3.0
+// @version      2.3.1
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -25,7 +25,16 @@
 // (div[jsname="JOC2Se"])に既に表示されている生マークダウンを直接読み取って
 // 整形する。本文取得・OAuth・ファイル ID 不要。
 
-(() => {
+// 単一ファイルのまま Node からも require できるよう factory 形式にしている。
+// Tampermonkey 上では module が無いので export はスキップし、document があれば
+// 副作用(スタイル注入・監視ループ)を起動する。Node(テスト)では純粋関数だけ
+// を公開し、副作用は起動しない。
+(function (factory) {
+  "use strict";
+  const api = factory();
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  if (typeof document !== "undefined") api.__bootstrap();
+})(function () {
   "use strict";
 
   const PANEL_ID = "gmd-panel";
@@ -49,9 +58,30 @@
   // 内容が変わったときだけピル/パネルを作り直す判定に使う。
   let currentKey = null;
 
+  // --- 純粋ヘルパー(test/userscript.test.js でテストする) -------------------
+
+  // ファイル名が Markdown 拡張子か。
+  function isMarkdownName(name) {
+    return typeof name === "string" && MD_EXT.test(name);
+  }
+
+  // 再描画判定に使う内容キー(ファイル名 + 本文長)。
+  function makeKey(fileName, textLen) {
+    return fileName + "|" + textLen;
+  }
+
+  // esbuild の global-name バンドルは末尾で
+  //   globalThis["mermaid"] = globalThis.__esbuild_esm_xxx["mermaid"].default
+  // を実行する。strict な間接 eval では top-level の var が global へ漏れず
+  // globalThis.__esbuild_esm_xxx が undefined になって落ちるため、globalThis
+  // 経由の参照を eval 内ローカル var 参照へ書き換える。
+  function transformMermaidGlobals(src) {
+    return src.replace(/globalThis\.(__esbuild_esm_\w+)/g, "$1");
+  }
+
   // --- スタイル -------------------------------------------------------------
 
-  GM_addStyle(`
+  const STYLE = `
 #gmd-panel{position:fixed;top:64px;left:50%;transform:translateX(-50%);
   z-index:2147483000;width:min(900px,92vw);max-height:calc(100vh - 96px);
   display:flex;flex-direction:column;background:#fff;color:#1f2328;
@@ -101,7 +131,7 @@
 .markdown-body hr{height:1px;border:0;background:#d8dee4;margin:24px 0}
 .gmd-mermaid{margin:0 0 16px;text-align:center;overflow-x:auto}
 .gmd-mermaid svg{max-width:100%;height:auto}
-`);
+`;
 
   // GM_addStyle が CSP 等で無効化されても最低限パネルが見えるよう、
   // 位置・重なり・背景など致命的なスタイルは CSSOM で直接当てる。
@@ -147,7 +177,7 @@
     scope.querySelectorAll("*").forEach((el) => {
       if (textEl.contains(el) || el.contains(textEl)) return;
       const t = (el.textContent || "").trim();
-      if (t.length <= 120 && t.length < shortest && MD_EXT.test(t)) {
+      if (t.length <= 120 && t.length < shortest && isMarkdownName(t)) {
         name = t;
         shortest = t.length;
       }
@@ -183,15 +213,9 @@
           try {
             if (res.status < 200 || res.status >= 300)
               throw new Error("HTTP " + res.status);
-            // esbuild の global-name バンドルは末尾で
-            //   globalThis["mermaid"] = globalThis.__esbuild_esm_xxx["mermaid"].default
-            // を実行するが、strict な間接 eval では top-level の var が global に
-            // 漏れず globalThis.__esbuild_esm_xxx が undefined になって落ちる。
-            // そこで globalThis 経由の参照を eval 内ローカル var 参照へ書き換える。
-            const code = res.responseText.replace(
-              /globalThis\.(__esbuild_esm_\w+)/g,
-              "$1"
-            );
+            // globalThis 経由の参照を eval 内ローカル var 参照へ書き換える
+            // (理由は transformMermaidGlobals のコメント参照)。
+            const code = transformMermaidGlobals(res.responseText);
             // Tampermonkey サンドボックスの globalThis と eval 内(真のグローバル
             // スコープ)の globalThis は別オブジェクトのことがある。グローバル
             // 読みに頼らず、eval の戻り値(末尾式の completion value)で受け取る。
@@ -382,14 +406,14 @@
       }
 
       const fileName = findFileName(found.el);
-      if (!fileName || !MD_EXT.test(fileName)) {
+      if (!isMarkdownName(fileName)) {
         // テキストビューアだが Markdown ではない(or 名前未検出)→ 片付ける
         removePanel();
         currentKey = null;
         return;
       }
 
-      const key = fileName + "|" + found.text.length;
+      const key = makeKey(fileName, found.text.length);
       // 同じ内容なら現状(ピル or 開いているパネル)をそのまま維持する。
       if (key === currentKey) return;
 
@@ -403,20 +427,29 @@
     }
   }
 
-  let timer = null;
-  function scheduleCheck() {
-    clearTimeout(timer);
-    timer = setTimeout(check, 250);
+  // --- 起動(ブラウザ/Tampermonkey のみ) -----------------------------------
+
+  function __bootstrap() {
+    if (typeof GM_addStyle === "function") GM_addStyle(STYLE);
+
+    let timer = null;
+    const scheduleCheck = () => {
+      clearTimeout(timer);
+      timer = setTimeout(check, 250);
+    };
+
+    // URL は変わらないので、DOM 変化・履歴・定期実行の合わせ技で開閉を検知する。
+    new MutationObserver(scheduleCheck).observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+    window.addEventListener("popstate", scheduleCheck);
+    window.addEventListener("hashchange", scheduleCheck);
+    setInterval(scheduleCheck, 1500);
+
+    scheduleCheck();
   }
 
-  // URL は変わらないので、DOM 変化・履歴・定期実行の合わせ技で開閉を検知する。
-  new MutationObserver(scheduleCheck).observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
-  window.addEventListener("popstate", scheduleCheck);
-  window.addEventListener("hashchange", scheduleCheck);
-  setInterval(scheduleCheck, 1500);
-
-  scheduleCheck();
-})();
+  // Node(テスト)向けに純粋関数を公開しつつ、ブラウザ起動用に __bootstrap を渡す。
+  return { MD_EXT, isMarkdownName, makeKey, transformMermaidGlobals, __bootstrap };
+});

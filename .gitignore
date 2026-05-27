@@ -1,3 +1,6 @@
+# Node
+node_modules/
+
 # Claude Code のローカル設定(環境依存・公開不要)
 .claude/
 
