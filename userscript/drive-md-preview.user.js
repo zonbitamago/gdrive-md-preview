@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.5.0
+// @version      2.6.0
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -123,7 +123,7 @@
 
   // 「別タブで開く」用の自己完結 HTML を組み立てる(content は描画済みの
   // サニタイズ済み HTML を想定)。
-  function buildStandaloneDoc(title, contentHtml, css) {
+  function buildStandaloneDoc(title, contentHtml, css, bodyScripts) {
     return (
       '<!doctype html><html lang="ja"><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -134,7 +134,9 @@
       "</style></head>" +
       '<body><article class="markdown-body">' +
       contentHtml +
-      "</article></body></html>"
+      "</article>" +
+      (bodyScripts || "") +
+      "</body></html>"
     );
   }
 
@@ -162,10 +164,12 @@
 .gmd-body{flex:1 1 auto;min-height:0;padding:24px 32px 40px;overflow-y:auto;font-size:15px;line-height:1.7}
 .gmd-source{margin:0;white-space:pre-wrap;word-break:break-word;
   font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.6}
-#gmd-pill{position:fixed;right:24px;bottom:24px;z-index:2147483000;border:none;
-  background:#1a73e8;color:#fff;border-radius:22px;padding:10px 16px;font-size:13px;
-  font-weight:600;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3)}
-#gmd-pill:hover{background:#1666c1}
+#gmd-pill{position:fixed;right:24px;bottom:24px;z-index:2147483000;display:flex;
+  border-radius:22px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.gmd-pill-btn{border:none;background:#1a73e8;color:#fff;padding:10px 16px;font-size:13px;
+  font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap}
+.gmd-pill-btn:hover{background:#1666c1}
+.gmd-pill-btn+.gmd-pill-btn{border-left:1px solid rgba(255,255,255,.35)}
 .gmd-body.markdown-body>*:first-child{margin-top:0}
 .markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4,
 .markdown-body h5,.markdown-body h6{margin:24px 0 16px;font-weight:600;line-height:1.3}
@@ -364,6 +368,41 @@
     }
   }
 
+  // --- 別タブ表示 -----------------------------------------------------------
+
+  // 別タブ用の自己完結 HTML を生成する。mermaid コードブロックは mermaid.run が
+  // 拾える <pre class="mermaid"> へ変換し、図があるときだけ CDN を読み込んで
+  // 新タブ側で描画する(blob は CSP 対象外なので CDN/インライン script 可)。
+  function makeNewTabDoc(fallbackTitle, html) {
+    const container = document.createElement("div");
+    container.innerHTML = html; // html は toHtml() でサニタイズ済み
+    const heading = container.querySelector("h1, h2, h3");
+    const titleText =
+      (heading && heading.textContent.trim()) || fallbackTitle || "Markdown";
+    const blocks = container.querySelectorAll("code.language-mermaid");
+    blocks.forEach((code) => {
+      const pre = code.closest("pre") || code;
+      const m = document.createElement("pre");
+      m.className = "mermaid";
+      m.textContent = code.textContent;
+      pre.replaceWith(m);
+    });
+    const scripts = blocks.length
+      ? '<script src="' +
+        MERMAID_URL +
+        '"></script><script>mermaid.initialize({startOnLoad:false,securityLevel:"strict"});mermaid.run();</script>'
+      : "";
+    return buildStandaloneDoc(titleText, container.innerHTML, NEWTAB_CSS, scripts);
+  }
+
+  // 整形済み html を新しいタブ(blob)で開く。ポップアップブロックを避けるため
+  // ユーザー操作と同期的に行う(await を挟まない)。
+  function openHtmlInNewTab(fallbackTitle, html) {
+    const doc = makeNewTabDoc(fallbackTitle, html);
+    const url = URL.createObjectURL(new Blob([doc], { type: "text/html" }));
+    window.open(url, "_blank");
+  }
+
   // --- パネル ---------------------------------------------------------------
 
   // パネルとピルの両方を DOM から取り除く。
@@ -375,17 +414,34 @@
   function showPill() {
     document.getElementById(PANEL_ID)?.remove();
     if (document.getElementById(PILL_ID)) return;
-    const pill = document.createElement("button");
+
+    const pill = document.createElement("div");
     pill.id = PILL_ID;
-    pill.type = "button";
-    pill.textContent = "📄 Markdown を整形表示";
-    pill.addEventListener("click", () => {
-      // ピル押下時に現在のビューア本文を読み取ってパネルを開く。
+
+    // 整形表示(Drive 上のフローティングパネル)
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "gmd-pill-btn";
+    openBtn.textContent = "📄 整形表示";
+    openBtn.addEventListener("click", () => {
       const found = findViewerText();
       if (!found) return;
-      const fileName = findFileName(found.el) || "";
-      renderPanel(fileName, found.text);
+      renderPanel(findFileName(found.el) || "", found.text);
     });
+
+    // 別タブで開く(独立したブラウザタブ)
+    const tabBtn = document.createElement("button");
+    tabBtn.type = "button";
+    tabBtn.className = "gmd-pill-btn";
+    tabBtn.textContent = "⧉ 別タブ";
+    tabBtn.addEventListener("click", () => {
+      const found = findViewerText();
+      if (!found) return;
+      if (typeof marked === "undefined" || typeof DOMPurify === "undefined") return;
+      openHtmlInNewTab(findFileName(found.el) || "", toHtml(found.text));
+    });
+
+    pill.append(openBtn, tabBtn);
     document.body.appendChild(pill);
   }
 
@@ -480,15 +536,9 @@
       showPill();
     });
 
-    // 別タブで開く: 現在の描画済み本文(Mermaid SVG 含む)を独立タブに表示。
-    // ソース表示中なら整形済み html を使う。
+    // 別タブで開く: 整形済み内容を独立タブに表示(Mermaid は新タブ側で描画)。
     newTabBtn.addEventListener("click", () => {
-      const contentHtml = body.classList.contains("markdown-body")
-        ? body.innerHTML
-        : html;
-      const doc = buildStandaloneDoc(title.textContent, contentHtml, NEWTAB_CSS);
-      const url = URL.createObjectURL(new Blob([doc], { type: "text/html" }));
-      window.open(url, "_blank");
+      openHtmlInNewTab(title.textContent, html);
     });
 
     // ヘッダーを掴んでパネルを移動できるようにする(ボタン上では無効)。
