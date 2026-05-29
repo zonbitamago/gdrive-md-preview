@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.6.1
+// @version      2.6.2
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -289,6 +289,34 @@
     return DOMPurify.sanitize(dirty, { ADD_ATTR: ["target"] });
   }
 
+  // フルページの単一ファイル表示(/file/d/<ID>/view)は
+  // require-trusted-types-for 'script' を強制しており、生文字列の innerHTML
+  // 代入が "This document requires 'TrustedHTML' assignment" で弾かれる。
+  // 信頼ポリシーを1つ用意し、innerHTML 代入はこれを通す(中身は DOMPurify /
+  // Mermaid(securityLevel:strict)で既にサニタイズ済み)。Trusted Types 未対応
+  // /未強制の環境(フォルダ内オーバーレイ等)では素通しのため挙動は変わらない。
+  let ttPolicy;
+  function getTTPolicy() {
+    if (ttPolicy !== undefined) return ttPolicy; // null も「作成試行済み」として記憶
+    const tt = typeof window !== "undefined" && window.trustedTypes;
+    ttPolicy = null;
+    if (tt && typeof tt.createPolicy === "function") {
+      try {
+        ttPolicy = tt.createPolicy("gmd", { createHTML: (s) => s });
+      } catch (e) {
+        // trusted-types ディレクティブでポリシー名が制限されている等。
+        LOG("trusted types policy creation failed:", e && e.message);
+      }
+    }
+    return ttPolicy;
+  }
+
+  // innerHTML 代入を Trusted Types 環境でも安全に行う。
+  function setHtml(el, html) {
+    const p = getTTPolicy();
+    el.innerHTML = p ? p.createHTML(String(html)) : html;
+  }
+
   // --- Mermaid(遅延ロード) ------------------------------------------------
 
   let mermaidLib = null; // ロード済みインスタンス
@@ -357,7 +385,7 @@
         const { svg } = await lib.render(id, src);
         const wrap = document.createElement("div");
         wrap.className = "gmd-mermaid";
-        wrap.innerHTML = svg; // mermaid(securityLevel:strict)でサニタイズ済み
+        setHtml(wrap, svg); // mermaid(securityLevel:strict)でサニタイズ済み
         pre.replaceWith(wrap);
       } catch (e) {
         LOG("mermaid render error:", e && e.message);
@@ -379,7 +407,7 @@
     // 画面外に一時接続する(mermaid のレイアウト計測には DOM 接続が必要)。
     container.style.cssText =
       "position:fixed;left:-99999px;top:0;width:900px;visibility:hidden;";
-    container.innerHTML = html; // html は toHtml() でサニタイズ済み
+    setHtml(container, html); // html は toHtml() でサニタイズ済み
     document.body.appendChild(container);
     try {
       await renderMermaid(container); // ```mermaid を SVG 化(失敗時はコードのまま)
@@ -509,7 +537,7 @@
 
     // 整形表示を描く(初回・ソースからの復帰の両方で使う)。
     const showRendered = () => {
-      body.innerHTML = html; // html は toHtml() で DOMPurify サニタイズ済み
+      setHtml(body, html); // html は toHtml() で DOMPurify サニタイズ済み
       body.classList.add("markdown-body");
       applyLinkTargets(body);
       renderMermaid(body); // Mermaid 図があれば非同期で SVG に差し替え
