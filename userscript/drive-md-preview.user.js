@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drive Markdown Preview
 // @namespace    gdrive-md-preview
-// @version      2.6.2
+// @version      2.6.3
 // @description  Google Drive で Markdown(.md)ファイルのプレビューを整形表示する
 // @author       zonbitamago
 // @license      MIT
@@ -275,6 +275,10 @@
     let shortest = Infinity;
     scope.querySelectorAll("*").forEach((el) => {
       if (textEl.contains(el) || el.contains(textEl)) return;
+      // フルページ表示(/file/d/<ID>/view)はダイアログが無く scope=document に
+      // なる。自分が開いたパネル/ピル内の "./foo.md" 等のリンク参照をファイル名と
+      // 誤検知すると内容キーがズレてパネルが閉じてしまうため、自 UI は除外する。
+      if (el.closest("#" + PANEL_ID + ",#" + PILL_ID)) return;
       const t = (el.textContent || "").trim();
       if (t.length <= 120 && t.length < shortest && isMarkdownName(t)) {
         name = t;
